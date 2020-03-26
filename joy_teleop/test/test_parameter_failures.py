@@ -32,6 +32,7 @@
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
+import contextlib
 import unittest
 
 import launch
@@ -42,63 +43,49 @@ import pytest
 
 @pytest.mark.rostest
 def generate_test_description():
-    parameters = {}
-    parameters['simple_message.type'] = 'topic'
-    parameters['simple_message.interface_type'] = 'std_msgs/msg/String'
-    parameters['simple_message.topic_name'] = '/simple_message_type'
-    parameters['simple_message.message_value.data.value'] = 'button2'
-
-    joy_teleop_node = launch_ros.actions.Node(
-        package='joy_teleop',
-        node_executable='joy_teleop',
-        output='both',
-        parameters=[parameters])
-
-    ld = launch.LaunchDescription()
-    ld.add_action(joy_teleop_node)
-    ld.add_action(launch_testing.actions.ReadyToTest())
-
-    return ld, locals()
+    return launch.LaunchDescription([launch_testing.actions.ReadyToTest()])
+    # return launch.LaunchDescription([
+    #     # Always restart daemon to isolate tests.
+    #     launch.actions.ExecuteProcess(
+    #         cmd=['ros2', 'daemon', 'stop'],
+    #         name='daemon-stop',
+    #         on_exit=[
+    #             launch.actions.ExecuteProcess(
+    #                 cmd=['ros2', 'daemon', 'start'],
+    #                 name='daemon-start',
+    #             )
+    #         ]
+    #     ),
+    # ])
 
 
-# TODO(clalancette): Can be removed once we switch to Foxy
-def assertInStderr(proc_output,
-                   expected_output,
-                   process,
-                   cmd_args=None,
-                   *,
-                   output_filter=None,
-                   strict_proc_matching=True):
+class TestJoyTeleopParameterFailures(unittest.TestCase):
 
-    resolved_procs = launch_testing.util.resolveProcesses(
-        info_obj=proc_output,
-        process=process,
-        cmd_args=cmd_args,
-        strict_proc_matching=strict_proc_matching
-    )
-    if output_filter is not None:
-        if not callable(output_filter):
-            raise ValueError('output_filter is not callable')
-    output_match = launch_testing.tools.text.build_text_match(expected_output)
+    @classmethod
+    def setUpClass(cls, launch_service, proc_info, proc_output):
+        @contextlib.contextmanager
+        def launch_joy_teleop(self, parameters):
+            joy_teleop_node = launch_ros.actions.Node(
+                package='joy_teleop',
+                node_executable='joy_teleop',
+                output='both',
+                parameters=[parameters])
 
-    for proc in resolved_procs:
-        full_output = ''.join(
-            output.text.decode() for output in proc_output[proc] if output.from_stderr
-        )
-        if output_filter is not None:
-            full_output = output_filter(full_output)
-        if output_match(full_output) is not None:
-            break
-    else:
-        names = ', '.join(sorted(p.process_details['name'] for p in resolved_procs))
-        assert False, "Did not find '{}' in output for any of the matching process: {}".format(
-            expected_output, names
-        )
+            with launch_testing.tools.launch_process(
+                    launch_service, joy_teleop_node, proc_info, proc_output) as joy_teleop:
+                yield joy_teleop
 
+        cls.launch_joy_teleop = launch_joy_teleop
 
-@launch_testing.post_shutdown_test()
-class TestJoyTeleopNoButtonParameter(unittest.TestCase):
+    def test_no_buttons_or_axes(self):
+        parameters = {}
+        parameters['simple_message.type'] = 'topic'
+        parameters['simple_message.interface_type'] = 'std_msgs/msg/String'
+        parameters['simple_message.topic_name'] = '/simple_message_type'
+        parameters['simple_message.message_value.data.value'] = 'button2'
 
-    def test_joy_teleop_no_button_parameter_exit_code(self, proc_info, joy_teleop_node):
-        launch_testing.asserts.assertExitCodes(proc_info, allowable_exit_codes=[1])
-        assertInStderr(self.proc_output, 'No buttons or axes configured for command', 'joy_teleop')
+        with self.launch_joy_teleop(parameters) as joy_teleop_process:
+            assert joy_teleop_process.wait_for_shutdown(timeout=10)
+
+        assert joy_teleop_process.exit_code == 1
+        # assert joy_teleop_process.output == ''
